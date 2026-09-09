@@ -2,11 +2,16 @@
 BTC/USD Trading Assistant
 --------------------------
 App de Streamlit que:
-1. Trae datos públicos de Binance (velas, order book, open interest) — sin API key.
+1. Trae datos públicos de Binance (velas, order book) — sin API key.
 2. Calcula indicadores técnicos localmente (RSI, WaveTrend/Cipher B, soportes/resistencias).
-3. Pide al usuario datos manuales (liquidation map de Coinglass, Bookmap, fundamentales).
+3. Pide al usuario capturas manuales (liquidation map + Open Interest de Coinglass, Bookmap)
+   y fundamentales.
 4. Envía todo el contexto a Claude (Anthropic API) con reglas de trading fijas.
 5. Muestra la recomendación de trade (o la ausencia de una entrada clara).
+
+Nota: el Open Interest vía API de Binance Futures (fapi.binance.com) está bloqueado de forma
+permanente (HTTP 451) desde hosting en la nube (GCP/AWS), incluido Streamlit Community Cloud.
+Por eso el OI se lee visualmente desde la captura de Coinglass en vez de traerse por API.
 """
 
 import base64
@@ -24,10 +29,8 @@ import anthropic
 # ---------------------------------------------------------------------------
 
 SYMBOL_SPOT = "BTCUSDT"
-SYMBOL_FUTURES = "BTCUSDT"
 TIMEFRAMES = ["5m", "15m", "1h", "4h"]
 BINANCE_SPOT = "https://data-api.binance.vision"  # mirror publico de solo datos, sin el geo-bloqueo de api.binance.com
-BINANCE_FUTURES = "https://fapi.binance.com"  # sin mirror alternativo conocido; puede seguir bloqueado desde la nube
 CLAUDE_MODEL = "claude-sonnet-5"  # cámbialo a "claude-haiku-4-5-20251001" si quieres bajar el costo aún más
 
 st.set_page_config(page_title="BTC/USD Trading Assistant", layout="wide")
@@ -62,23 +65,6 @@ def get_klines(symbol: str, interval: str, limit: int = 200) -> pd.DataFrame:
 def get_orderbook(symbol: str, limit: int = 50) -> dict:
     url = f"{BINANCE_SPOT}/api/v3/depth"
     params = {"symbol": symbol, "limit": limit}
-    r = requests.get(url, params=params, timeout=10)
-    r.raise_for_status()
-    return r.json()
-
-
-@st.cache_data(ttl=30)
-def get_open_interest(symbol: str) -> dict:
-    url = f"{BINANCE_FUTURES}/fapi/v1/openInterest"
-    r = requests.get(url, params={"symbol": symbol}, timeout=10)
-    r.raise_for_status()
-    return r.json()
-
-
-@st.cache_data(ttl=60)
-def get_oi_history(symbol: str, period: str = "1h", limit: int = 30) -> list:
-    url = f"{BINANCE_FUTURES}/futures/data/openInterestHist"
-    params = {"symbol": symbol, "period": period, "limit": limit}
     r = requests.get(url, params=params, timeout=10)
     r.raise_for_status()
     return r.json()
@@ -219,41 +205,27 @@ def build_market_context() -> dict:
         context["order_book"] = None
         context["data_warnings"].append(f"Order book no disponible ({e}).")
 
-    try:
-        oi_now = get_open_interest(SYMBOL_FUTURES)
-        oi_hist = get_oi_history(SYMBOL_FUTURES, period="1h", limit=24)
-        oi_change_pct = None
-        if len(oi_hist) >= 2:
-            first = float(oi_hist[0]["sumOpenInterest"])
-            last = float(oi_hist[-1]["sumOpenInterest"])
-            oi_change_pct = round((last - first) / first * 100, 2) if first else None
-
-        context["open_interest"] = {
-            "current": float(oi_now["openInterest"]),
-            "change_24h_pct": oi_change_pct,
-        }
-    except Exception as e:
-        context["open_interest"] = None
-        context["data_warnings"].append(
-            f"Open Interest no disponible ({e}). Probable bloqueo geografico de Binance Futures "
-            "desde el servidor de hosting; analiza con las variables restantes."
-        )
-
     return context
 
 
 SYSTEM_PROMPT = """Eres un analista técnico experto en trading de BTC/USD (futuros/spot, crypto).
 
 Recibirás un JSON con: datos técnicos multi-timeframe (precio, RSI, WaveTrend/Cipher B, soportes/
-resistencias, últimas velas), order book, open interest, y notas manuales del usuario sobre
-liquidation map (Coinglass), Bookmap y variables fundamentales. El liquidation map y/o Bookmap
-pueden llegar como capturas de pantalla adjuntas (imágenes) en vez de texto, o además del texto —
-analiza esas imágenes visualmente como parte de tu evaluación cuando estén presentes.
+resistencias, últimas velas), order book, y notas manuales del usuario sobre liquidation map
+(Coinglass), Bookmap y variables fundamentales. El liquidation map y/o Bookmap pueden llegar como
+capturas de pantalla adjuntas (imágenes) en vez de texto, o además del texto — analiza esas
+imágenes visualmente como parte de tu evaluación cuando estén presentes.
 
-Nota: "order_book" y "open_interest" pueden venir como null si esa fuente no estuvo disponible al
-momento de la consulta (revisa "data_warnings" para ver cuál). En ese caso, basa tu análisis en las
-variables restantes disponibles, y si la ausencia de esa variable te impide alcanzar una confianza
-razonable, refléjalo con una confianza más baja o con "trade_disponible": false.
+La captura del liquidation map de Coinglass puede incluir también un panel de "Open Interest/
+Market Cap" (histograma de barras, normalmente en la parte inferior del gráfico, timeframe 1H).
+Si está presente, léelo como una señal cualitativa de tendencia (subiendo, bajando, plana, o
+divergiendo del precio) — NO intentes inferir un porcentaje exacto de variación a partir de la
+imagen, ya que no es un dato preciso como el resto de las variables numéricas.
+
+Nota: "order_book" puede venir como null si esa fuente no estuvo disponible al momento de la
+consulta (revisa "data_warnings" para ver por qué). En ese caso, basa tu análisis en las variables
+restantes disponibles, y si la ausencia de esa variable te impide alcanzar una confianza razonable,
+refléjalo con una confianza más baja o con "trade_disponible": false.
 
 REGLAS QUE DEBES SEGUIR ESTRICTAMENTE:
 
@@ -351,7 +323,7 @@ def call_claude(
 # ---------------------------------------------------------------------------
 
 st.title("📈 BTC/USD Trading Assistant")
-st.caption("Análisis técnico + order book + open interest + liquidation map + Bookmap + fundamentales → Claude")
+st.caption("Análisis técnico + order book + liquidation map + Open Interest (Coinglass) + Bookmap + fundamentales → Claude")
 
 with st.sidebar:
     st.header("Configuración")
@@ -369,21 +341,21 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("1. Datos automáticos (Binance)")
-    st.info("Se traen automáticamente al hacer clic en 'Analizar' más abajo.")
+    st.info("Se traen automáticamente al hacer clic en 'Analizar' más abajo. (Velas + order book. Open Interest se lee desde la captura de Coinglass →)")
 
 with col2:
     st.subheader("2. Datos manuales")
 
     liq_map_file = st.file_uploader(
-        "Captura del liquidation map de Coinglass",
+        "Captura de Coinglass (liquidation map + Open Interest)",
         type=["png", "jpg", "jpeg"],
         key="liq_map_file",
-        help="Arrastra el archivo, o haz clic aquí y pega con Ctrl+V.",
+        help="Incluye el panel de Open Interest/Market Cap si lo tienes activado (recomendado: timeframe 1H, zoom a los últimos 2-3 días). Arrastra el archivo, o haz clic aquí y pega con Ctrl+V.",
     )
     if liq_map_file is not None:
-        st.image(liq_map_file, caption="Liquidation map", use_container_width=True)
+        st.image(liq_map_file, caption="Liquidation map / Open Interest", use_container_width=True)
     liq_map_notes = st.text_area(
-        "Notas adicionales sobre el liquidation map (opcional)",
+        "Notas adicionales sobre el liquidation map / OI (opcional)",
         placeholder="Ej: esto es de las últimas 4 horas",
         key="liq_map_notes",
     )
