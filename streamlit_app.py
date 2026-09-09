@@ -26,8 +26,8 @@ import anthropic
 SYMBOL_SPOT = "BTCUSDT"
 SYMBOL_FUTURES = "BTCUSDT"
 TIMEFRAMES = ["5m", "15m", "1h", "4h"]
-BINANCE_SPOT = "https://api.binance.com"
-BINANCE_FUTURES = "https://fapi.binance.com"
+BINANCE_SPOT = "https://data-api.binance.vision"  # mirror publico de solo datos, sin el geo-bloqueo de api.binance.com
+BINANCE_FUTURES = "https://fapi.binance.com"  # sin mirror alternativo conocido; puede seguir bloqueado desde la nube
 CLAUDE_MODEL = "claude-sonnet-5"  # cámbialo a "claude-haiku-4-5-20251001" si quieres bajar el costo aún más
 
 st.set_page_config(page_title="BTC/USD Trading Assistant", layout="wide")
@@ -183,7 +183,7 @@ def find_support_resistance(df: pd.DataFrame, window: int = 5, num_levels: int =
 
 
 def build_market_context() -> dict:
-    context = {"timeframes": {}}
+    context = {"timeframes": {}, "data_warnings": []}
 
     for tf in TIMEFRAMES:
         df = get_klines(SYMBOL_SPOT, tf, limit=200)
@@ -205,28 +205,39 @@ def build_market_context() -> dict:
             .to_dict(orient="records"),
         }
 
-    ob = get_orderbook(SYMBOL_SPOT, limit=50)
-    bids = sorted(ob["bids"], key=lambda x: float(x[1]), reverse=True)[:5]
-    asks = sorted(ob["asks"], key=lambda x: float(x[1]), reverse=True)[:5]
-    context["order_book"] = {
-        "top_bid_walls": [{"price": float(p), "qty": float(q)} for p, q in bids],
-        "top_ask_walls": [{"price": float(p), "qty": float(q)} for p, q in asks],
-        "best_bid": float(ob["bids"][0][0]),
-        "best_ask": float(ob["asks"][0][0]),
-    }
+    try:
+        ob = get_orderbook(SYMBOL_SPOT, limit=50)
+        bids = sorted(ob["bids"], key=lambda x: float(x[1]), reverse=True)[:5]
+        asks = sorted(ob["asks"], key=lambda x: float(x[1]), reverse=True)[:5]
+        context["order_book"] = {
+            "top_bid_walls": [{"price": float(p), "qty": float(q)} for p, q in bids],
+            "top_ask_walls": [{"price": float(p), "qty": float(q)} for p, q in asks],
+            "best_bid": float(ob["bids"][0][0]),
+            "best_ask": float(ob["asks"][0][0]),
+        }
+    except Exception as e:
+        context["order_book"] = None
+        context["data_warnings"].append(f"Order book no disponible ({e}).")
 
-    oi_now = get_open_interest(SYMBOL_FUTURES)
-    oi_hist = get_oi_history(SYMBOL_FUTURES, period="1h", limit=24)
-    oi_change_pct = None
-    if len(oi_hist) >= 2:
-        first = float(oi_hist[0]["sumOpenInterest"])
-        last = float(oi_hist[-1]["sumOpenInterest"])
-        oi_change_pct = round((last - first) / first * 100, 2) if first else None
+    try:
+        oi_now = get_open_interest(SYMBOL_FUTURES)
+        oi_hist = get_oi_history(SYMBOL_FUTURES, period="1h", limit=24)
+        oi_change_pct = None
+        if len(oi_hist) >= 2:
+            first = float(oi_hist[0]["sumOpenInterest"])
+            last = float(oi_hist[-1]["sumOpenInterest"])
+            oi_change_pct = round((last - first) / first * 100, 2) if first else None
 
-    context["open_interest"] = {
-        "current": float(oi_now["openInterest"]),
-        "change_24h_pct": oi_change_pct,
-    }
+        context["open_interest"] = {
+            "current": float(oi_now["openInterest"]),
+            "change_24h_pct": oi_change_pct,
+        }
+    except Exception as e:
+        context["open_interest"] = None
+        context["data_warnings"].append(
+            f"Open Interest no disponible ({e}). Probable bloqueo geografico de Binance Futures "
+            "desde el servidor de hosting; analiza con las variables restantes."
+        )
 
     return context
 
@@ -238,6 +249,11 @@ resistencias, últimas velas), order book, open interest, y notas manuales del u
 liquidation map (Coinglass), Bookmap y variables fundamentales. El liquidation map y/o Bookmap
 pueden llegar como capturas de pantalla adjuntas (imágenes) en vez de texto, o además del texto —
 analiza esas imágenes visualmente como parte de tu evaluación cuando estén presentes.
+
+Nota: "order_book" y "open_interest" pueden venir como null si esa fuente no estuvo disponible al
+momento de la consulta (revisa "data_warnings" para ver cuál). En ese caso, basa tu análisis en las
+variables restantes disponibles, y si la ausencia de esa variable te impide alcanzar una confianza
+razonable, refléjalo con una confianza más baja o con "trade_disponible": false.
 
 REGLAS QUE DEBES SEGUIR ESTRICTAMENTE:
 
@@ -407,6 +423,9 @@ if st.button("🔍 Analizar y generar entrada", type="primary", use_container_wi
                 "bookmap": bookmap_notes or ("Ver captura adjunta" if bookmap_image else "No proporcionado"),
                 "fundamentales": fundamentals or "No proporcionado",
             }
+
+        for warning in context.get("data_warnings", []):
+            st.warning(warning)
 
         with st.spinner("Consultando a Claude..."):
             try:
