@@ -229,31 +229,61 @@ refléjalo con una confianza más baja o con "trade_disponible": false.
 
 REGLAS QUE DEBES SEGUIR ESTRICTAMENTE:
 
-1. Si decides dar un trade, debe incluir: dirección (LONG/SHORT), precio de entrada, Stop Loss,
-   Take Profit, Ratio Riesgo/Beneficio (RR) y una nota de confianza de 1 a 10.
-2. El RR mínimo permitido es 2:1, EXCEPTO si tu nota de confianza es 8 o más, en cuyo caso el RR
-   mínimo permitido baja a 1:1.
-3. NO estás obligado a dar un trade. Si el mercado no ofrece una entrada clara con un SL/TP/RR que
-   tenga sentido, responde indicando que NO hay setup válido en este momento y explica por qué
-   (ej: rango sin definición, señales contradictorias entre timeframes, liquidez insuficiente, etc).
-4. Explica el razonamiento: qué variables pesaron más en la decisión y por qué.
-5. Nunca fuerces una operación solo por dar una respuesta.
-6. Llena SOLO UNO de los dos campos de texto, nunca ambos:
-   - Si trade_disponible es true: llena "razonamiento" (máximo 60 palabras) y deja "razon_no_trade" en null.
-   - Si trade_disponible es false: llena "razon_no_trade" (máximo 60 palabras) y deja "razonamiento" en null.
+1. Identifica primero cuál timeframe impulsa la tesis del trade ("timeframe_setup": "5m", "15m",
+   "1h" o "4h") — el que aporta la señal principal (ej: la divergencia, el soporte/resistencia
+   relevante). Este campo es obligatorio siempre que trade_disponible sea true.
+
+2. El Stop Loss debe ubicarse más allá de un nivel estructural real (swing high/low o zona de
+   soporte/resistencia) de ESE MISMO timeframe (timeframe_setup) — nunca lo calcules usando la
+   volatilidad o el ruido de un timeframe menor al que impulsa la tesis. Si el setup es de 4h, el
+   SL respeta estructura de 4h, aunque se vea "ancho" comparado con el ruido de 5m.
+
+3. Decide el tipo de orden ("tipo_orden"):
+   - "MARKET": el precio actual ya está en una zona de entrada válida para el timeframe_setup.
+   - "LIMIT": la dirección es clara pero el precio necesita retroceder a un nivel mejor (ej: pullback
+     a un soporte) antes de tener una entrada válida. "entrada" es el precio gatillo, no el actual.
+   - "STOP": la dirección es clara pero se necesita confirmación de ruptura antes de entrar (ej:
+     quiebre de una resistencia). "entrada" es el precio gatillo, no el actual.
+   Si usas LIMIT o STOP, llena "invalidacion_orden": la condición bajo la cual esa orden pendiente
+   deja de tener sentido y debe cancelarse (ej: "cancelar si el precio rompe 78,200 antes de activarse
+   la entrada", o "cancelar si no se activa en las próximas 6-8 horas").
+
+4. El RR mínimo permitido es 2:1, EXCEPTO si tu confianza es 8 o más, en cuyo caso el RR mínimo baja
+   a 1:1. Esto aplica igual para MARKET, LIMIT y STOP, calculado sobre el precio de entrada/gatillo.
+
+5. NO estás obligado a dar un trade. Si el mercado no ofrece una entrada clara (ni siquiera vía
+   LIMIT/STOP) con un SL/TP/RR que tenga sentido, responde con "trade_disponible": false.
+
+6. Cuando "trade_disponible" es false, SIEMPRE llena "proxima_revision" con una condición concreta
+   de cuándo o bajo qué evento volver a analizar (ej: "esperar cierre de vela 4h", "revisar tras la
+   apertura de Nueva York", o si de verdad no hay nada que esperar hoy, "sin trades hoy: rango sin
+   definición macro"). Nunca la dejes vacía ni genérica tipo "revisar más tarde".
+
+7. Explica el razonamiento: qué variables pesaron más en la decisión y por qué.
+
+8. Llena SOLO UNO de los dos bloques de texto, nunca ambos:
+   - Si trade_disponible es true: llena "razonamiento" (máximo 60 palabras). Deja "razon_no_trade"
+     y "proxima_revision" en null.
+   - Si trade_disponible es false: llena "razon_no_trade" y "proxima_revision" (cada uno conciso,
+     máximo 40 palabras). Deja "razonamiento", "timeframe_setup", "tipo_orden", "entrada",
+     "invalidacion_orden", "stop_loss", "take_profit", "ratio_rr" y "confianza" en null.
 
 Responde ÚNICAMENTE con un JSON válido (sin texto adicional antes o después), con esta forma exacta:
 
 {
   "trade_disponible": true/false,
+  "timeframe_setup": "5m" | "15m" | "1h" | "4h" | null,
+  "tipo_orden": "MARKET" | "LIMIT" | "STOP" | null,
   "direccion": "LONG" | "SHORT" | null,
   "entrada": number | null,
+  "invalidacion_orden": "string, solo si tipo_orden es LIMIT o STOP" | null,
   "stop_loss": number | null,
   "take_profit": number | null,
   "ratio_rr": number | null,
   "confianza": number | null,
-  "razonamiento": "string explicando el por qué, citando las variables clave",
-  "razon_no_trade": "string, solo si trade_disponible es false"
+  "razonamiento": "string, maximo 60 palabras, solo si trade_disponible es true" | null,
+  "razon_no_trade": "string, solo si trade_disponible es false" | null,
+  "proxima_revision": "string, solo si trade_disponible es false" | null
 }
 """
 
@@ -410,18 +440,33 @@ if st.button("🔍 Analizar y generar entrada", type="primary", use_container_wi
 
         if result.get("trade_disponible"):
             direccion = result["direccion"]
+            tipo_orden = result.get("tipo_orden", "MARKET")
             color = "🟢" if direccion == "LONG" else "🔴"
+
+            orden_label = {
+                "MARKET": "MERCADO (entrar ahora)",
+                "LIMIT": "LIMIT (pendiente, retroceso)",
+                "STOP": "STOP (pendiente, ruptura)",
+            }.get(tipo_orden, tipo_orden)
+            st.markdown(f"**Tipo de orden:** {orden_label}  |  **Timeframe del setup:** {result.get('timeframe_setup', '—')}")
+
             c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("Dirección", f"{color} {direccion}")
-            c2.metric("Entrada", result["entrada"])
+            c2.metric("Entrada" if tipo_orden == "MARKET" else "Precio gatillo", result["entrada"])
             c3.metric("Stop Loss", result["stop_loss"])
             c4.metric("Take Profit", result["take_profit"])
             c5.metric("RR / Confianza", f"{result['ratio_rr']}:1 — {result['confianza']}/10")
+
+            if tipo_orden in ("LIMIT", "STOP") and result.get("invalidacion_orden"):
+                st.info(f"**Invalidación de la orden pendiente:** {result['invalidacion_orden']}")
+
             st.markdown("### Razonamiento")
             st.write(result["razonamiento"])
         else:
             st.warning("No hay un setup de trade claro en este momento.")
-            st.write(result.get("razon_no_trade", result.get("razonamiento", "")))
+            st.write(result.get("razon_no_trade", ""))
+            if result.get("proxima_revision"):
+                st.markdown(f"**Próxima revisión:** {result['proxima_revision']}")
 
         with st.expander("Ver datos crudos enviados al modelo (debug)"):
             st.json(context)
