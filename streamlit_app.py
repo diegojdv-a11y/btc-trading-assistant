@@ -329,7 +329,8 @@ def call_claude(
     message = client.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=8192,
-        thinking={"type": "enabled", "budget_tokens": 6000},  # tope amplio: deja ~2192 tokens garantizados para la respuesta final
+        thinking={"type": "adaptive"},  # el modelo decide cuanto pensar segun la complejidad real del caso
+        output_config={"effort": "high"},  # nivel de esfuerzo alto, sin limitar la profundidad de analisis
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": build_message_content(context, liq_image, bookmap_image)}],
     )
