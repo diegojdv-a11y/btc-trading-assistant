@@ -329,6 +329,7 @@ def call_claude(
     message = client.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=4096,
+        thinking={"type": "enabled", "budget_tokens": 1500},  # tope explicito: deja ~2500 tokens garantizados para la respuesta final
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": build_message_content(context, liq_image, bookmap_image)}],
     )
