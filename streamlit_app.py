@@ -328,8 +328,8 @@ def call_claude(
     client = anthropic.Anthropic(api_key=api_key)
     message = client.messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=4096,
-        thinking={"type": "enabled", "budget_tokens": 1500},  # tope explicito: deja ~2500 tokens garantizados para la respuesta final
+        max_tokens=8192,
+        thinking={"type": "enabled", "budget_tokens": 6000},  # tope amplio: deja ~2192 tokens garantizados para la respuesta final
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": build_message_content(context, liq_image, bookmap_image)}],
     )
